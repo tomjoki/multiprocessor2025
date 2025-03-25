@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <windows.h>
 #include <CL/opencl.h>
+#include "lodepng.h"
 
 float** allocate_memory_to_matrix(int rows, int cols);
 float** allocate_values_to_matrix(float** matrix, int rows, int cols, float value);
@@ -10,6 +11,11 @@ float** add_matrix(float** matrix_1, float** matrix_2, int rows, int cols);
 void print_matrix_values(float** matrix, int rows, int cols);
 void free_matrix_memory(float** matrix, int rows, int cols);
 double get_time();
+void ReadImage(const char* filename, unsigned char** image, unsigned *width, unsigned *height);
+void resize_image(unsigned char** image, unsigned* width, unsigned* height, unsigned char** resized_image);
+void GrayScaleImage(unsigned char** image, unsigned* width, unsigned* height, unsigned char** gray_image);
+void ApplyFilter();
+void WriteImage(const char* filename, const unsigned char** image, unsigned* width, unsigned* height);
 
 
 int main() {
@@ -20,9 +26,19 @@ int main() {
 
     int rows = 100;
     int cols = 100;
+    const char* filename = "<path_to_file>/im0.png";
+    unsigned char* resized_image = NULL;
+    unsigned char* gray_image = NULL;
+    unsigned char* image = NULL;
+    unsigned width = 0, height = 0;
+    unsigned resized_width = 735, resized_height = 504;
+    ReadImage(filename, &image, &width, &height);
+    printf("width is: %u, height is: %u\n", width, height);
 
-
-
+    resize_image(&image, &width, &height, &resized_image);
+    GrayScaleImage(&image, &width, &height, &gray_image);
+    WriteImage("<path_to_file>/im0_resize.png", &resized_image, &resized_width, &resized_height);
+    WriteImage("<path_to_file>/im0_bw.png", &gray_image, &width, &height);
     float** matrix_1 = allocate_memory_to_matrix(rows, cols);
     float** matrix_2 = allocate_memory_to_matrix(rows, cols);
     if (matrix_1 == NULL || matrix_2 == NULL) {
@@ -50,7 +66,7 @@ int main() {
     cl_platform_id platforms[64];
     unsigned int platform_count;
     cl_int platform_result = clGetPlatformIDs(64, platforms, &platform_count);
-    assert (platform_result == CL_SUCCESS);
+    assert(platform_result == CL_SUCCESS);
     printf("%d\n", platform_count);
     char platform_name[256];
     size_t platform_name_length;
@@ -88,7 +104,6 @@ int main() {
         clGetDeviceIDs(platforms[i], CL_DEVICE_TYPE_ALL, num_devices, devices, NULL);
 
         for (int j = 0; j < num_devices; ++j) {
-
             clGetDeviceInfo(devices[j], CL_DEVICE_NAME, 0, NULL, &str_info_size);
             str_info = (char*)malloc(str_info_size);
             clGetDeviceInfo(devices[j], CL_DEVICE_NAME, str_info_size, str_info, NULL);
@@ -103,12 +118,74 @@ int main() {
 
         }
     }
-
-
-    
-
     return 0;
 }
+
+void ApplyFilter(unsigned char** image, unsigned* width, unsigned* height) {
+    // maybe like this? not sure tho
+    const float filter[5][5] = {
+        {1/25, 1/25, 1/25, 1/25, 1/25},
+        {1/25, 1/25, 1/25, 1/25, 1/25},
+        {1/25, 1/25, 1/25, 1/25, 1/25},
+        {1/25, 1/25, 1/25, 1/25, 1/25},
+        {1/25, 1/25, 1/25, 1/25, 1/25}
+    };
+}
+
+void WriteImage(const char* filename, const unsigned char** image, unsigned* width, unsigned* height){
+    /*Encode the image*/
+    unsigned error = lodepng_encode32_file(filename, *image, *width, *height);
+
+    /*if there's an error, display it*/
+    if (error) printf("error %u: %s\n", error, lodepng_error_text(error));
+}
+
+void GrayScaleImage(unsigned char** image, unsigned* width, unsigned* height, unsigned char** gray_image) {
+    *gray_image = (unsigned char*)malloc((* width) * (* height) * 4 * sizeof(unsigned char));
+    for (unsigned int i = 0; i < *width; i++) {
+        for (unsigned int j = 0; j < *height; j++) {
+            unsigned int index = 4 * (j * (*width) + i);
+            // r * 0.2126 + g * 0.7152 + b * 0.0722 --> gray
+            unsigned char gray_value = (unsigned char)(((*image)[index] * 0.2126) + ((*image)[index + 1] * 0.7152) + ((*image)[index + 2] * 0.0722));
+            (*gray_image)[index] = gray_value;
+            (*gray_image)[index + 1] = gray_value;
+            (*gray_image)[index + 2] = gray_value;
+            (*gray_image)[index + 3] = (*image)[index + 3];
+        }
+    }
+}
+
+void resize_image(unsigned char** image, unsigned* width, unsigned* height, unsigned char** resized_image) {
+    // reduces the size of the picture by 4 ==> 1/16th of the original image
+    unsigned int new_width = *width / 4;
+    unsigned int new_height = *height / 4;
+    printf("\nnew width is %u, new height is: %u\n", new_width, new_height);
+    *resized_image = (unsigned char*)malloc(new_width * new_height * 4 * sizeof(unsigned char));
+
+    for (unsigned int i = 0; i < new_width; i++) {
+        for (unsigned int j = 0; j < new_height; j++) {
+            unsigned int index = 4 * (j * new_width + i);
+            unsigned int original_index = 4 * ((j * 4) * (*width) + (i * 4));
+            (*resized_image)[index] = (*image)[original_index];
+            (*resized_image)[index + 1] = (*image)[original_index + 1];
+            (*resized_image)[index + 2] = (*image)[original_index + 2];
+            (*resized_image)[index + 3] = (*image)[original_index + 3];
+        }
+    }
+}
+
+void ReadImage(const char* filename, unsigned char** image, unsigned* width, unsigned* height) {
+    unsigned error;
+
+    error = lodepng_decode32_file(image, width, height, filename);
+    if (error) {
+        printf("error %u: %s\n", error, lodepng_error_text(error));
+        return;
+    }
+
+    //free(*image);
+}
+
 
 float** allocate_memory_to_matrix(int rows, int cols) {
     float** matrix = (float**)malloc(rows * sizeof(float*));
