@@ -14,7 +14,7 @@ double get_time();
 void ReadImage(const char* filename, unsigned char** image, unsigned *width, unsigned *height);
 void resize_image(unsigned char** image, unsigned* width, unsigned* height, unsigned char** resized_image);
 void GrayScaleImage(unsigned char** image, unsigned* width, unsigned* height, unsigned char** gray_image);
-void ApplyFilter();
+void ApplyFilter(unsigned char** image, unsigned* width, unsigned* height, unsigned char** blurred_image);
 void WriteImage(const char* filename, const unsigned char** image, unsigned* width, unsigned* height);
 
 
@@ -30,6 +30,7 @@ int main() {
     unsigned char* resized_image = NULL;
     unsigned char* gray_image = NULL;
     unsigned char* image = NULL;
+    unsigned char* blurred_image = NULL;
     unsigned width = 0, height = 0;
     unsigned resized_width = 735, resized_height = 504;
     ReadImage(filename, &image, &width, &height);
@@ -37,8 +38,10 @@ int main() {
 
     resize_image(&image, &width, &height, &resized_image);
     GrayScaleImage(&image, &width, &height, &gray_image);
+    ApplyFilter(&image, &width, &height, &blurred_image);
     WriteImage("<path_to_file>/im0_resize.png", &resized_image, &resized_width, &resized_height);
     WriteImage("<path_to_file>/im0_bw.png", &gray_image, &width, &height);
+    WriteImage("<path_to_file>/im0_blurred.png", &blurred_image, &width, &height);
     float** matrix_1 = allocate_memory_to_matrix(rows, cols);
     float** matrix_2 = allocate_memory_to_matrix(rows, cols);
     if (matrix_1 == NULL || matrix_2 == NULL) {
@@ -121,15 +124,43 @@ int main() {
     return 0;
 }
 
-void ApplyFilter(unsigned char** image, unsigned* width, unsigned* height) {
-    // maybe like this? not sure tho
+void ApplyFilter(unsigned char** image, unsigned* width, unsigned* height, unsigned char** blurred_image) {
+    // source: gaussian blur discrete approximation www.researchgate.net/figure/Discrete-approximation-of-the-Gaussian-kernels-3x3-5x5-7x7_fig2_325768087
     const float filter[5][5] = {
-        {1/25, 1/25, 1/25, 1/25, 1/25},
-        {1/25, 1/25, 1/25, 1/25, 1/25},
-        {1/25, 1/25, 1/25, 1/25, 1/25},
-        {1/25, 1/25, 1/25, 1/25, 1/25},
-        {1/25, 1/25, 1/25, 1/25, 1/25}
+        {1.0f / 273, 4.0f / 273, 7.0f / 273, 4.0f / 273, 1.0f / 273},
+        {4.0f / 273, 16.0f / 273, 26.0f / 273, 16.0f / 273, 4.0f / 273},
+        {7.0f / 273, 26.0f / 273, 41.0f / 273, 26.0f / 273, 7.0f / 273},
+        {4.0f / 273, 16.0f / 273, 26.0f / 273, 16.0f / 273, 4.0f / 273},
+        {1.0f / 273, 4.0f / 273, 7.0f / 273, 4.0f / 273, 1.0f / 273}
     };
+    *blurred_image = (unsigned char*)malloc((* width) * (* height) * 4 * sizeof(unsigned char));
+    if (!blurred_image) {
+        printf("Error: Memory allocation failed.\n");
+        return;
+    }
+
+    for (unsigned j = 2; j < (*height) - 2; j++) {
+        for (unsigned i = 2; i < (*width) - 2; i++) {
+            float r = 0.0f, g = 0.0f, b = 0.0f;
+            unsigned center_index = 4 * (j * (* width) + i);
+
+            for (int fj = -2; fj <= 2; fj++) {
+                for (int fi = -2; fi <= 2; fi++) {
+                    unsigned neighbor_index = 4 * ((j + fj) * (* width) + (i + fi));
+                    float weight = filter[fj + 2][fi + 2];
+
+                    r += (*image)[neighbor_index] * weight;
+                    g += (*image)[neighbor_index + 1] * weight;
+                    b += (*image)[neighbor_index + 2] * weight;
+                }
+            }
+
+            (* blurred_image)[center_index] = (unsigned char)(r < 0 ? 0 : (r > 255 ? 255 : r));
+            (*blurred_image)[center_index + 1] = (unsigned char)(g < 0 ? 0 : (g > 255 ? 255 : g));
+            (*blurred_image)[center_index + 2] = (unsigned char)(b < 0 ? 0 : (b > 255 ? 255 : b));
+            (*blurred_image)[center_index + 3] = (*image)[center_index + 3];
+        }
+    }
 }
 
 void WriteImage(const char* filename, const unsigned char** image, unsigned* width, unsigned* height){
@@ -137,7 +168,9 @@ void WriteImage(const char* filename, const unsigned char** image, unsigned* wid
     unsigned error = lodepng_encode32_file(filename, *image, *width, *height);
 
     /*if there's an error, display it*/
-    if (error) printf("error %u: %s\n", error, lodepng_error_text(error));
+    if (error) {
+        printf("error %u: %s\n", error, lodepng_error_text(error));
+    }
 }
 
 void GrayScaleImage(unsigned char** image, unsigned* width, unsigned* height, unsigned char** gray_image) {
