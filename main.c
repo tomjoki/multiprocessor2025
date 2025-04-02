@@ -1,3 +1,8 @@
+#define RESIZE_KERNEL_FUNC "resizeImage"
+#define GRAYSCALE_KERNEL_FUNC "convertToGrayscale"
+#define FILTER_KERNEL_FUNC "gaussianBlurFilter"
+#define CL_USE_DEPRECATED_OPENCL_1_2_APIS
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -5,67 +10,102 @@
 #include <CL/opencl.h>
 #include "lodepng.h"
 
-float** allocate_memory_to_matrix(int rows, int cols);
-float** allocate_values_to_matrix(float** matrix, int rows, int cols, float value);
-float** add_matrix(float** matrix_1, float** matrix_2, int rows, int cols);
-void print_matrix_values(float** matrix, int rows, int cols);
-void free_matrix_memory(float** matrix, int rows, int cols);
 double get_time();
-void ReadImage(const char* filename, unsigned char** image, unsigned *width, unsigned *height);
-void resize_image(unsigned char** image, unsigned* width, unsigned* height, unsigned char** resized_image);
-void GrayScaleImage(unsigned char** image, unsigned* width, unsigned* height, unsigned char** gray_image);
-void ApplyFilter(unsigned char** image, unsigned* width, unsigned* height, unsigned char** blurred_image);
-void WriteImage(const char* filename, const unsigned char** image, unsigned* width, unsigned* height);
-
 
 int main() {
 
-    cl_int status;
+    const char* resizeKernel = 
+        "__kernel void resizeImage(__global const uchar4* image, __global uchar4* result_image, int inwidth, int inheight, int outwidth, int outheight) {"
+        "    int x = get_global_id(0);                                                                                                                   "
+        "    int y = get_global_id(1);                                                                                                                   "
+        "    if (x >= outwidth || y >= outheight) return;                                                                                                "
+        "    int in_x = x * 4;                                                                                                                           "
+        "    int in_y = y * 4;                                                                                                                           "
+        "    uint4 sum = (uint4)(0, 0, 0, 0);                                                                                                            "
+        "    for (int dy = 0; dy < 4; dy++) {                                                                                                            "
+        "       for (int dx = 0; dx < 4; dx++) {                                                                                                         "
+        "           uchar4 pixel = image[(in_y + dy) * inwidth + (in_x + dx)];                                                                           "
+        "           sum.x += pixel.x;                                                                                                                    "
+        "           sum.y += pixel.y;                                                                                                                    "
+        "           sum.z += pixel.z;                                                                                                                    "
+        "           sum.w += pixel.w;                                                                                                                    "
+        "       }                                                                                                                                        "
+        "    }                                                                                                                                           "
+        "    uchar4 result;                                                                                                                              "
+        "    result.x = sum.x / 16;                                                                                                                      "
+        "    result.y = sum.y / 16;                                                                                                                      "
+        "    result.z = sum.z / 16;                                                                                                                      "
+        "    result.w = sum.w / 16;                                                                                                                      "
+        "    result_image[y * outwidth + x] = result;                                                                                                    "
+        "}                                                                                                                                               "
+        ;
+
+    const char* grayscaleKernel =
+        "__kernel void convertToGrayscale(__global const uchar4 * image, __global uchar* grayscale, int width, int height) {"
+        "    int x = get_global_id(0);                                                                                      "
+        "    int y = get_global_id(1);                                                                                      "
+        "    if (x >= width || y >= height) return;                                                                         "
+        "    int single_dim_index = y * width + x;                                                                          "
+        "    uchar4 pixel = image[single_dim_index];                                                                        "
+        "    uchar gray_conversion = (uchar)(0.2126f * pixel.x + 0.7152f * pixel.y + 0.0722f * pixel.z);                    "
+        "    grayscale[single_dim_index] = gray_conversion;                                                                 "
+        "}                                                                                                                  "
+        ;
+
+    const char* filterKernel =
+        "__kernel void gaussianBlurFilter(__global const uchar4* image, __global uchar4* filtered, int width, int height) {"
+        "    int x = get_global_id(0);                                                                                    "
+        "    int y = get_global_id(1);                                                                                    "
+        "    if (x < 2 || y < 2 || x >= width - 2 || y >= height - 2) {                                                   "
+        "        filtered[y * width + x] = image[y * width + x];                                                          "
+        "        return;                                                                                                  "
+        "    }                                                                                                            "
+        "    const float filter[5][5] = {                                                                                 "
+        "        {1.0f / 273, 4.0f / 273, 7.0f / 273, 4.0f / 273, 1.0f / 273},                                            "
+        "        {4.0f / 273, 16.0f / 273, 26.0f / 273, 16.0f / 273, 4.0f / 273},                                         "
+        "        {7.0f / 273, 26.0f / 273, 41.0f / 273, 26.0f / 273, 7.0f / 273},                                         "
+        "        {4.0f / 273, 16.0f / 273, 26.0f / 273, 16.0f / 273, 4.0f / 273},                                         "
+        "        {1.0f / 273, 4.0f / 273, 7.0f / 273, 4.0f / 273, 1.0f / 273}                                             "
+        "    };                                                                                                           "
+        "    float4 sum = (float4)(0.0f);                                                                                 "
+        "    for (int ky = -2; ky <= 2; ky++) {                                                                           "
+        "        int yi = y + ky;                                                                                         "
+        "        for (int kx = -2; kx <= 2; kx++) {                                                                       "
+        "            int xi = x + kx;                                                                                     "
+        "            float weight = filter[ky + 2][kx + 2];                                                               "
+        "            sum += convert_float4(image[yi * width + xi]) * weight;                                              "
+        "        }                                                                                                        "
+        "    }                                                                                                            "
+        "    filtered[y * width + x] = convert_uchar4(sum + (float4)(0.5f));                                              "
+        "}                                                                                                                "
+        ;
+
 
     double curr_time = get_time();
 
-    int rows = 100;
-    int cols = 100;
-    const char* filename = "<path_to_file>/im0.png";
-    unsigned char* resized_image = NULL;
-    unsigned char* gray_image = NULL;
+    const char* filename = "C:/Users/Tommi/Desktop/MultiProcessor/Project1/Project1/im0.png";
     unsigned char* image = NULL;
-    unsigned char* blurred_image = NULL;
     unsigned width = 0, height = 0;
-    unsigned resized_width = 735, resized_height = 504;
-    ReadImage(filename, &image, &width, &height);
+
+    unsigned error;
+
+    error = lodepng_decode32_file(&image, &width, &height, filename);
+    if (error) {
+        printf("error %u: %s\n", error, lodepng_error_text(error));
+        return;
+    }
     printf("width is: %u, height is: %u\n", width, height);
 
-    resize_image(&image, &width, &height, &resized_image);
-    GrayScaleImage(&image, &width, &height, &gray_image);
-    ApplyFilter(&image, &width, &height, &blurred_image);
-    WriteImage("<path_to_file>/im0_resize.png", &resized_image, &resized_width, &resized_height);
-    WriteImage("<path_to_file>/im0_bw.png", &gray_image, &width, &height);
-    WriteImage("<path_to_file>/im0_blurred.png", &blurred_image, &width, &height);
-    float** matrix_1 = allocate_memory_to_matrix(rows, cols);
-    float** matrix_2 = allocate_memory_to_matrix(rows, cols);
-    if (matrix_1 == NULL || matrix_2 == NULL) {
-        printf("ERROR");
-        return 1;
-    }
-    matrix_1 = allocate_values_to_matrix(matrix_1, rows, cols, 1);
-    matrix_2 = allocate_values_to_matrix(matrix_2, rows, cols, 2);
+    unsigned resized_width = width / 4, resized_height = height / 4;
 
-    float** matrix_3 = add_matrix(matrix_1, matrix_2, rows, cols);
-    free_matrix_memory(matrix_1, rows, cols);
-    free_matrix_memory(matrix_2, rows, cols);
-    free_matrix_memory(matrix_3, rows, cols);
-    matrix_1 = NULL;
-    matrix_2 = NULL;
-    matrix_3 = NULL;
+    printf("resized width will be: %u, resized height will be: %u\n", resized_width, resized_height);
 
-    double time_after_exec = get_time();
-    // printf("time b4 exec: %f\n", curr_time);
-    // printf("time after exec: %f\n", time_after_exec);
+    unsigned char* resized_image = (unsigned char*)malloc(resized_width * resized_height * 4);
+    unsigned char* gray_image = (unsigned char*)malloc(width * height);
+    unsigned char* filtered_image = (unsigned char*)malloc(width * height * 4);
 
-    double execution_time = time_after_exec - curr_time;
-    printf("Execution time: %f (seconds)\n", execution_time);
-
+    // Platform statistics -----------------------------------------------------------------------------------
+    cl_int status;
     cl_platform_id platforms[64];
     unsigned int platform_count;
     cl_int platform_result = clGetPlatformIDs(64, platforms, &platform_count);
@@ -79,7 +119,6 @@ int main() {
     cl_uint uint_info;
     cl_uint       num_devices;
     cl_device_id* devices;
-
     for (int i = 0; i < platform_count; ++i) {
         printf("  Platform:\n");
 
@@ -121,157 +160,243 @@ int main() {
 
         }
     }
+    //--------------------------------------------------------------------------------------------------------
+
+    // OpenCL variables for resize kernel, duplicates for other programs and kernels made from these
+    cl_int err;
+    cl_platform_id platform;
+    cl_device_id device;
+    cl_context ctx;
+    cl_command_queue queue;
+    cl_program program;
+    cl_kernel kernel;
+    cl_mem buffer_input;
+    cl_mem buffer_result;
+    FILE* program_handle;
+    char* program_buffer, * program_log;
+    size_t program_size, log_size;
+
+    err = clGetPlatformIDs(1, &platform, NULL);
+    assert(err == CL_SUCCESS);
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+    assert(err == CL_SUCCESS);
+    ctx = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
+    assert(err == CL_SUCCESS);
+
+
+    buffer_input = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, width * height * 4, image, &err);
+    assert(err == CL_SUCCESS);
+    cl_mem grayscale_buffer_input;
+    grayscale_buffer_input = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, width * height * 4, image, &err);
+    assert(err == CL_SUCCESS);
+    cl_mem filter_buffer_input;
+    filter_buffer_input = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, width * height * 4, image, &err);
+    assert(err == CL_SUCCESS);
+
+    buffer_result = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, resized_width * resized_height * 4, NULL, &err);
+    assert(err == CL_SUCCESS);
+    cl_mem grayscale_buffer_result;
+    grayscale_buffer_result = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, width * height, NULL, &err);
+    assert(err == CL_SUCCESS);
+    cl_mem filter_buffer_result;
+    filter_buffer_result = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, width * height * 4, NULL, &err);
+    assert(err == CL_SUCCESS);
+
+    // Resize program
+    program = clCreateProgramWithSource(ctx, 1,
+        (const char**)&resizeKernel, NULL, &err);
+    if (err < 0) {
+        perror("Error creating program");
+        exit(1);
+    }
+
+    // Grayscale program
+    cl_program grayscale_program;
+    grayscale_program = clCreateProgramWithSource(ctx, 1,
+        (const char**)&grayscaleKernel, NULL, &err);
+    if (err < 0) {
+        perror("Error creating program");
+        exit(1);
+    }
+
+    // Filter program
+    cl_program filter_program;
+    filter_program = clCreateProgramWithSource(ctx, 1,
+        (const char**)&filterKernel, NULL, &err);
+    if (err < 0) {
+        perror("Error creating program");
+        exit(1);
+    }
+
+    // Build all programs
+    err = clBuildProgram(program, 1, &device, NULL, NULL, NULL);
+
+    if (err < 0) {
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        program_log = (char*)malloc(log_size + 1);
+        program_log[log_size] = '\0';
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, log_size + 1, program_log, NULL);
+        printf("%s\n", program_log);
+        free(program_log);
+        exit(1);
+    }
+
+    err = clBuildProgram(grayscale_program, 1, &device, NULL, NULL, NULL);
+
+    if (err < 0) {
+        clGetProgramBuildInfo(grayscale_program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        program_log = (char*)malloc(log_size + 1);
+        program_log[log_size] = '\0';
+        clGetProgramBuildInfo(grayscale_program, device, CL_PROGRAM_BUILD_LOG, log_size + 1, program_log, NULL);
+        printf("%s\n", program_log);
+        free(program_log);
+        exit(1);
+    }
+
+    err = clBuildProgram(filter_program, 1, &device, NULL, NULL, NULL);
+
+    if (err < 0) {
+        clGetProgramBuildInfo(filter_program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_size);
+        program_log = (char*)malloc(log_size + 1);
+        program_log[log_size] = '\0';
+        clGetProgramBuildInfo(filter_program, device, CL_PROGRAM_BUILD_LOG, log_size + 1, program_log, NULL);
+        printf("%s\n", program_log);
+        free(program_log);
+        exit(1);
+    }
+
+    // Create kernels for all programs
+    kernel = clCreateKernel(program, RESIZE_KERNEL_FUNC, &err);
+    if (err < 0) {
+        perror("Couldn't create the kernel");
+        exit(1);
+    }
+    cl_kernel grayscale_kernel;
+    grayscale_kernel = clCreateKernel(grayscale_program, GRAYSCALE_KERNEL_FUNC, &err);
+    if (err < 0) {
+        perror("Couldn't create the kernel");
+        exit(1);
+    }
+    cl_kernel filter_kernel;
+    filter_kernel = clCreateKernel(filter_program, FILTER_KERNEL_FUNC, &err);
+    if (err < 0) {
+        perror("Couldn't create the kernel");
+        exit(1);
+    }
+
+
+    // Set arguments for resize kernel
+    err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &buffer_input);
+    if (err < 0) {
+        perror("Error setting the kernel argument");
+        exit(1);
+    }
+    clSetKernelArg(kernel, 1, sizeof(cl_mem), &buffer_result);
+    clSetKernelArg(kernel, 2, sizeof(unsigned int), &width);
+    clSetKernelArg(kernel, 3, sizeof(unsigned int), &height);
+    clSetKernelArg(kernel, 4, sizeof(unsigned int), &resized_width);
+    clSetKernelArg(kernel, 5, sizeof(unsigned int), &resized_height);
+
+
+    // Create command queue
+    queue = clCreateCommandQueue(ctx, device, 0, &err);
+    if (err < 0) {
+        perror("Error creating the command queue");
+        exit(1);
+    }
+
+    // Execute the resize kernel
+    size_t globalSize[2] = {resized_width, resized_height};
+    err = clEnqueueNDRangeKernel(queue, kernel, 2, NULL, globalSize, NULL, 0, NULL, NULL);
+
+    // Read the result buffer
+    err = clEnqueueReadBuffer(queue, buffer_result, CL_TRUE, 0, resized_width * resized_height * 4, resized_image, 0, NULL, NULL);
+
+    // Save the resized image result as PNG
+    error = lodepng_encode32_file("C:/Users/Tommi/Desktop/MultiProcessor/Project1/Project1/im0_resize.png", resized_image, resized_width, resized_height);
+    if (error) {
+        printf("Error %u: %s\n", error, lodepng_error_text(error));
+    }
+
+
+
+    // Set arguments for grayscale kernel
+    clSetKernelArg(grayscale_kernel, 0, sizeof(cl_mem), &grayscale_buffer_input);
+    clSetKernelArg(grayscale_kernel, 1, sizeof(cl_mem), &grayscale_buffer_result);
+    int w = (int)width, h = (int)height;
+    clSetKernelArg(grayscale_kernel, 2, sizeof(unsigned int), &w);
+    clSetKernelArg(grayscale_kernel, 3, sizeof(unsigned int), &h);
+
+    // Execute grayscale kernel
+    size_t grayscaleGlobalSize[2] = { width, height };
+    err = clEnqueueNDRangeKernel(queue, grayscale_kernel, 2, NULL, grayscaleGlobalSize, NULL, 0, NULL, NULL);
+
+    // Read the result buffer for grayscale image
+    err = clEnqueueReadBuffer(queue, grayscale_buffer_result, CL_TRUE, 0, width * height, gray_image, 0, NULL, NULL);
+
+
+    // Convert grayscale data to rgba and save to png
+    unsigned char* output_rgba = (unsigned char*)malloc(width * height * 4);
+    for (unsigned i = 0; i < width * height; i++) {
+        output_rgba[i * 4 + 0] = gray_image[i]; // R
+        output_rgba[i * 4 + 1] = gray_image[i]; // G
+        output_rgba[i * 4 + 2] = gray_image[i]; // B
+        output_rgba[i * 4 + 3] = 255;          // A
+    }
+    error = lodepng_encode32_file("C:/Users/Tommi/Desktop/MultiProcessor/Project1/Project1/im0_bw.png", output_rgba, width, height);
+    if (error) {
+        printf("Error %u: %s\n", error, lodepng_error_text(error));
+    }
+
+    // Set arguments for filter kernel
+    clSetKernelArg(filter_kernel, 0, sizeof(cl_mem), &filter_buffer_input);
+    clSetKernelArg(filter_kernel, 1, sizeof(cl_mem), &filter_buffer_result);
+    clSetKernelArg(filter_kernel, 2, sizeof(unsigned int), &width);
+    clSetKernelArg(filter_kernel, 3, sizeof(unsigned int), &height);
+
+    // Execute filter kernel
+    size_t filterGlobalSize[2] = { width, height };
+    err = clEnqueueNDRangeKernel(queue, filter_kernel, 2, NULL, filterGlobalSize, NULL, 0, NULL, NULL);
+
+    // Read the result buffer for filtered image
+    err = clEnqueueReadBuffer(queue, filter_buffer_result, CL_TRUE, 0, width * height * 4, filtered_image, 0, NULL, NULL);
+
+    error = lodepng_encode32_file("C:/Users/Tommi/Desktop/MultiProcessor/Project1/Project1/im0_filtered.png", filtered_image, width, height);
+    if (error) {
+        printf("Error %u: %s\n", error, lodepng_error_text(error));
+    }
+
+
+    free(image);
+    free(resized_image);
+    free(gray_image);
+    free(output_rgba);
+    free(filtered_image);
+    clReleaseMemObject(buffer_input);
+    clReleaseMemObject(grayscale_buffer_input);
+    clReleaseMemObject(filter_buffer_input);
+    clReleaseMemObject(buffer_result);
+    clReleaseMemObject(grayscale_buffer_result);
+    clReleaseMemObject(filter_buffer_result);
+    clReleaseKernel(kernel);
+    clReleaseKernel(grayscale_kernel);
+    clReleaseKernel(filter_kernel);
+    clReleaseProgram(program);
+    clReleaseProgram(grayscale_program);
+    clReleaseProgram(filter_program);
+    clReleaseCommandQueue(queue);
+    clReleaseContext(ctx);
+
+
+
+    double time_after_exec = get_time();
+    // printf("time b4 exec: %f\n", curr_time);
+    // printf("time after exec: %f\n", time_after_exec);
+
+    double execution_time = time_after_exec - curr_time;
+    printf("Execution time: %f (seconds)\n", execution_time);
+
     return 0;
-}
-
-void ApplyFilter(unsigned char** image, unsigned* width, unsigned* height, unsigned char** blurred_image) {
-    // source: gaussian blur discrete approximation www.researchgate.net/figure/Discrete-approximation-of-the-Gaussian-kernels-3x3-5x5-7x7_fig2_325768087
-    const float filter[5][5] = {
-        {1.0f / 273, 4.0f / 273, 7.0f / 273, 4.0f / 273, 1.0f / 273},
-        {4.0f / 273, 16.0f / 273, 26.0f / 273, 16.0f / 273, 4.0f / 273},
-        {7.0f / 273, 26.0f / 273, 41.0f / 273, 26.0f / 273, 7.0f / 273},
-        {4.0f / 273, 16.0f / 273, 26.0f / 273, 16.0f / 273, 4.0f / 273},
-        {1.0f / 273, 4.0f / 273, 7.0f / 273, 4.0f / 273, 1.0f / 273}
-    };
-    *blurred_image = (unsigned char*)malloc((* width) * (* height) * 4 * sizeof(unsigned char));
-    if (!blurred_image) {
-        printf("Error: Memory allocation failed.\n");
-        return;
-    }
-
-    for (unsigned j = 2; j < (*height) - 2; j++) {
-        for (unsigned i = 2; i < (*width) - 2; i++) {
-            float r = 0.0f, g = 0.0f, b = 0.0f;
-            unsigned center_index = 4 * (j * (* width) + i);
-
-            for (int fj = -2; fj <= 2; fj++) {
-                for (int fi = -2; fi <= 2; fi++) {
-                    unsigned neighbor_index = 4 * ((j + fj) * (* width) + (i + fi));
-                    float weight = filter[fj + 2][fi + 2];
-
-                    r += (*image)[neighbor_index] * weight;
-                    g += (*image)[neighbor_index + 1] * weight;
-                    b += (*image)[neighbor_index + 2] * weight;
-                }
-            }
-
-            (* blurred_image)[center_index] = (unsigned char)(r < 0 ? 0 : (r > 255 ? 255 : r));
-            (*blurred_image)[center_index + 1] = (unsigned char)(g < 0 ? 0 : (g > 255 ? 255 : g));
-            (*blurred_image)[center_index + 2] = (unsigned char)(b < 0 ? 0 : (b > 255 ? 255 : b));
-            (*blurred_image)[center_index + 3] = (*image)[center_index + 3];
-        }
-    }
-}
-
-void WriteImage(const char* filename, const unsigned char** image, unsigned* width, unsigned* height){
-    /*Encode the image*/
-    unsigned error = lodepng_encode32_file(filename, *image, *width, *height);
-
-    /*if there's an error, display it*/
-    if (error) {
-        printf("error %u: %s\n", error, lodepng_error_text(error));
-    }
-}
-
-void GrayScaleImage(unsigned char** image, unsigned* width, unsigned* height, unsigned char** gray_image) {
-    *gray_image = (unsigned char*)malloc((* width) * (* height) * 4 * sizeof(unsigned char));
-    for (unsigned int i = 0; i < *width; i++) {
-        for (unsigned int j = 0; j < *height; j++) {
-            unsigned int index = 4 * (j * (*width) + i);
-            // r * 0.2126 + g * 0.7152 + b * 0.0722 --> gray
-            unsigned char gray_value = (unsigned char)(((*image)[index] * 0.2126) + ((*image)[index + 1] * 0.7152) + ((*image)[index + 2] * 0.0722));
-            (*gray_image)[index] = gray_value;
-            (*gray_image)[index + 1] = gray_value;
-            (*gray_image)[index + 2] = gray_value;
-            (*gray_image)[index + 3] = (*image)[index + 3];
-        }
-    }
-}
-
-void resize_image(unsigned char** image, unsigned* width, unsigned* height, unsigned char** resized_image) {
-    // reduces the size of the picture by 4 ==> 1/16th of the original image
-    unsigned int new_width = *width / 4;
-    unsigned int new_height = *height / 4;
-    printf("\nnew width is %u, new height is: %u\n", new_width, new_height);
-    *resized_image = (unsigned char*)malloc(new_width * new_height * 4 * sizeof(unsigned char));
-
-    for (unsigned int i = 0; i < new_width; i++) {
-        for (unsigned int j = 0; j < new_height; j++) {
-            unsigned int index = 4 * (j * new_width + i);
-            unsigned int original_index = 4 * ((j * 4) * (*width) + (i * 4));
-            (*resized_image)[index] = (*image)[original_index];
-            (*resized_image)[index + 1] = (*image)[original_index + 1];
-            (*resized_image)[index + 2] = (*image)[original_index + 2];
-            (*resized_image)[index + 3] = (*image)[original_index + 3];
-        }
-    }
-}
-
-void ReadImage(const char* filename, unsigned char** image, unsigned* width, unsigned* height) {
-    unsigned error;
-
-    error = lodepng_decode32_file(image, width, height, filename);
-    if (error) {
-        printf("error %u: %s\n", error, lodepng_error_text(error));
-        return;
-    }
-
-    //free(*image);
-}
-
-
-float** allocate_memory_to_matrix(int rows, int cols) {
-    float** matrix = (float**)malloc(rows * sizeof(float*));
-    if (matrix == NULL) {
-        fprintf(stderr, "Memory allocation failed\n");
-        return NULL;
-    }
-
-    for (int i = 0; i < rows; i++) {
-        matrix[i] = (float*)malloc(cols * sizeof(float));
-        if (matrix[i] == NULL) {
-            fprintf(stderr, "Memory allocation failed\n");
-            return NULL;
-        }
-    }
-    return matrix;
-}
-
-float** allocate_values_to_matrix(float** matrix, int rows, int cols, float value) {
-    for (int i = 0; i < rows; i++) {
-        for (int j = 0; j < cols; j++) {
-            matrix[i][j] = value;
-        }
-    }
-    return matrix;
-}
-
-float** add_matrix(float** matrix_1, float** matrix_2, int rows, int cols) {
-    float** new_matrix = allocate_memory_to_matrix(rows, cols);
-    for (int i = 0; i < rows; i++) {
-        for (int j = 0; j < cols; j++) {
-            new_matrix[i][j] = matrix_1[i][j] + matrix_2[i][j];
-        }
-    }
-    //print_matrix_values(new_matrix, rows, cols);
-    return new_matrix;
-}
-
-void print_matrix_values(float** matrix, int rows, int cols) {
-    for (int i = 0; i < rows; i++) {
-        printf("Row %d\n", i + 1);
-        for (int j = 0; j < cols; j++) {
-            printf("%f ", matrix[i][j]);
-        }
-        printf("\n");
-    }
-}
-
-void free_matrix_memory(float** matrix, int rows, int cols) {
-    for (int i = 0; i < rows; i++) {
-        free((void*)matrix[i]);
-    }
-    free((void*)matrix);
 }
 
 double get_time() {
